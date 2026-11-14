@@ -51,6 +51,32 @@ class ReachNode(Node):
 
         self.get_logger().info(f'marker detected at pixel (u={u:.1f}, v={v:.1f})')
 
+        depth_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
+
+        fx = info_msg.k[0]
+        fy = info_msg.k[4]
+        cx = info_msg.k[2]
+        cy = info_msg.k[5]
+
+        u_px = int(round(u))
+        v_px = int(round(v))
+        u_px = max(0, min(u_px, depth_image.shape[1] - 1))
+        v_px = max(0, min(v_px, depth_image.shape[0] - 1))
+
+        depth_value = float(depth_image[v_px, u_px])
+
+        MAX_VALID_DEPTH = 5.0  # meters — generic sanity bound for this scene, see report.md
+        
+        if not np.isfinite(depth_value) or depth_value <= 0.0 or depth_value > MAX_VALID_DEPTH:
+            self.get_logger().warn(f'invalid depth value at pixel (u={u_px}, v={v_px}): {depth_value}')
+            return
+
+        Z = depth_value
+        X = (u - cx) * Z / fx
+        Y = (v - cy) * Z / fy
+
+        self.get_logger().info(f'3D position of marker in camera frame: (X={X:.3f}, Y={Y:.3f}, Z={Z:.3f})')
+
 
 def main():
         rclpy.init()
