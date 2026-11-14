@@ -9,10 +9,17 @@ import numpy as np
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
 
+from geometry_msgs.msg import PointStamped
+import tf2_ros
+from tf2_geometry_msgs import do_transform_point
+from rclpy.duration import Duration
+
 class ReachNode(Node):
     def __init__(self):
         super().__init__('reach_node')
         self.bridge = CvBridge()
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self.rgb_sub = message_filters.Subscriber(self, Image, '/camera/image_raw', qos_profile=qos_profile_sensor_data)
         self.depth_sub = message_filters.Subscriber(self, Image, '/camera/depth/image_raw', qos_profile=qos_profile_sensor_data)
@@ -76,6 +83,22 @@ class ReachNode(Node):
         Y = (v - cy) * Z / fy
 
         self.get_logger().info(f'3D position of marker in camera frame: (X={X:.3f}, Y={Y:.3f}, Z={Z:.3f})')
+
+        point_in_camera = PointStamped()
+        point_in_camera.header.stamp = rgb_msg.header.stamp
+        point_in_camera.header.frame_id = info_msg.header.frame_id
+        point_in_camera.point.x = X
+        point_in_camera.point.y = Y
+        point_in_camera.point.z = Z
+        try:
+            transform = self.tf_buffer.lookup_transform('base_link', point_in_camera.header.frame_id, point_in_camera.header.stamp, timeout=Duration(seconds=0.1))
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+            self.get_logger().warn(f'TF lookup failed: {e}')
+            return
+
+        point_in_base = do_transform_point(point_in_camera, transform)
+        self.get_logger().info(f'3D position of marker in base_link frame: (X={point_in_base.point.x:.3f}, Y={point_in_base.point.y:.3f}, Z={point_in_base.point.z:.3f})')
+        
 
 
 def main():
