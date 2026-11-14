@@ -6,6 +6,7 @@ import message_filters
 from sensor_msgs.msg import Image, CameraInfo
 
 import numpy as np
+import time
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
 
@@ -13,13 +14,25 @@ from geometry_msgs.msg import PointStamped
 import tf2_ros
 from tf2_geometry_msgs import do_transform_point
 from rclpy.duration import Duration
+from rclpy.time import Time
+from rclpy.parameter import Parameter
+
+from hw01_sim.arm_client import ArmClient
+
 
 class ReachNode(Node):
     def __init__(self):
-        super().__init__('reach_node')
+        super().__init__('reach_node', parameter_overrides=[Parameter('use_sim_time', value=True)])
+        
         self.bridge = CvBridge()
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+        self.target_camera_pub = self.create_publisher(PointStamped, '/hw01/target_camera', 10)
+        self.target_base_pub = self.create_publisher(PointStamped, '/hw01/target_base', 10)
+        self.arm = ArmClient(self)
+        self.last_camera_wall_time = time.time()
+        self.motion_busy = False
 
         self.rgb_sub = message_filters.Subscriber(self, Image, '/camera/image_raw', qos_profile=qos_profile_sensor_data)
         self.depth_sub = message_filters.Subscriber(self, Image, '/camera/depth/image_raw', qos_profile=qos_profile_sensor_data)
@@ -31,6 +44,8 @@ class ReachNode(Node):
         self.get_logger().info('reach_node started, waiting for synchronized camera frames...')
 
     def on_synced_frames(self, rgb_msg: Image, depth_msg: Image, info_msg: CameraInfo):
+        self.last_camera_wall_time = time.time()
+
         try:
             rgb_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='bgr8')
         except CvBridgeError as e:
@@ -98,15 +113,56 @@ class ReachNode(Node):
 
         point_in_base = do_transform_point(point_in_camera, transform)
         self.get_logger().info(f'3D position of marker in base_link frame: (X={point_in_base.point.x:.3f}, Y={point_in_base.point.y:.3f}, Z={point_in_base.point.z:.3f})')
-        
+        self.target_camera_pub.publish(point_in_camera)
+        self.target_base_pub.publish(point_in_base)
 
+        target_point = PointStamped()
+        target_point.header.stamp = point_in_base.header.stamp
+        target_point.header.frame_id = point_in_base.header.frame_id
+        target_point.point.x = point_in_base.point.x
+        target_point.point.y = point_in_base.point.y
+        target_point.point.z = point_in_base.point.z + 0.08
+
+        now_sim = self.get_clock().now()
+        stamp_time = Time.from_msg(point_in_base.header.stamp)
+        observation_age = (now_sim - stamp_time).nanoseconds / 1e9
+
+        if observation_age > 0.5:
+            self.get_logger().warn(f'observation too old (age={observation_age:.2f}s), skipping motion')
+            return
+
+        camera_data_age = time.time() - self.last_camera_wall_time
+        if camera_data_age > 2.0:   
+            self.get_logger().warn(f'no fresh camera data for {camera_data_age:.2f}s), skipping motion')
+            return
+
+        if self.motion_busy or not self.arm.ready():
+            self.get_logger().warn('arm busy with another motion, skipping this detection')     
+            return
+
+        self.motion_busy = True
+        future = self.arm.move_to_point(target_point)
+        future.add_done_callback(self.on_motion_done)
+
+    def on_motion_done(self, future):
+        self.motion_busy = False
+        result = future.result()
+        if result.success:
+            self.get_logger().info(f'arm motion completed successfully: {result.message}')
+        else:
+            self.get_logger().error(f'arm motion failed: {result.message}')
 
 def main():
         rclpy.init()
         node = ReachNode()
-        rclpy.spin(node)
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.spin(node)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            node.arm.cancel()
+            node.destroy_node()
+            rclpy.try_shutdown()
 
 if __name__ == '__main__':
         main()
