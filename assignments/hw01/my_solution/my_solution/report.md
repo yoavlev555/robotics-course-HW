@@ -2,11 +2,17 @@
 
 ## 1. Marker Detection
 
+Before detection runs, incoming RGB, depth, and camera-info messages are matched by timestamp using `message_filters.ApproximateTimeSynchronizer`
+with a slop of 0.05 simulated seconds, ensuring the pixel-color data and the depth value used to reconstruct each detection originate from the same simulated instant.
+
 The incoming RGB frame is converted from BGR to the HSV color space using cv2.cvtColor. HSV was chosen over BGR because it separates color identity (Hue) from illumination (Value), making the detection robust to lighting variation and partial shadowing in the scene - a property BGR does not offer, since all three of its channels change jointly under lighting changes.
 
 Because OpenCV represents Hue on a circular scale of 0–179, the color red - which lies at the wrap-around point of the hue wheel - cannot be captured by a single contiguous range. Two ranges are therefore defined, one near each end of the scale ([0,10] and [160,179]), each with a minimum saturation/value of 100 to reject washed-out, non-vivid pixels. The two resulting binary masks are combined with a logical OR to produce the final red-pixel mask.
 
-The marker’s pixel location is computed as the centroid of all pixels flagged in the mask: np.nonzero(mask) returns the (row, column) indices of every non-zero pixel, and their mean gives the center-of-mass coordinates (u, v). This is mathematically equivalent to a moments-based centroid, since every mask pixel carries equal weight (0 or 255). If no pixel is flagged (len(xs) == 0), the frame is treated as “marker not visible”: a warning is logged and the callback returns immediately, preventing a division-by-zero or downstream processing of an undefined pixel location.
+The marker’s pixel location is computed as the centroid of all pixels flagged in the mask: np.nonzero(mask) returns the (row, column) indices of every non-zero pixel, and their mean gives the center-of-mass coordinates (u, v). This is mathematically equivalent to a moments-based centroid, since every mask pixel carries equal weight (0 or 255). 
+A single threshold check handles both the "missing" and "unreliable/partly occluded" cases required by the assignment: if fewer than `MIN_MARKER_PIXELS` (5) pixels are flagged, the frame is rejected as not showing a trustworthy marker - "zero pixels" (fully missing) is simply the extreme case of "too few
+pixels" (an unreliable, likely noise-driven, partial detection). 
+In either case a warning is logged and the callback returns immediately, preventing a division-by-zero or downstream processing of an undefined/low-confidence pixel location.
 
 ## 2. Depth Lookup & 3D Reconstruction
 
@@ -31,7 +37,7 @@ Two independent staleness checks guard against acting on outdated data. observat
 
 Beyond the specific validity checks on depth and TF transforms (covered above), the node includes several additional layers of defense against failure.
 
-Image conversion from the ROS message to OpenCV format is wrapped in a try/except CvBridgeError block: a single malformed or unexpectedly-encoded frame is logged and skipped, rather than raising an unhandled exception that would crash the entire node.
+Image conversion from the ROS message to OpenCV format is wrapped in try/except CvBridgeError blocks for both the RGB and depth frames: a single malformed or unexpectedly-encoded frame is logged and skipped, rather than raising an unhandled exception that would crash the entire node.
 
 Since camera callbacks fire continuously and independently of how long a previous arm motion takes to complete, a self.motion_busy flag (combined with an arm.ready() check) guards against issuing overlapping or conflicting motion commands while a previous one is still in flight. This flag is cleared unconditionally in the on_motion_done completion callback - regardless of whether the motion succeeded or failed - since clearing it only on success would permanently lock the robot out of future commands after any single motion failure.
 
@@ -60,24 +66,24 @@ tolerance, with no platform or marker contact detected throughout the hold perio
 With the simulation restarted under `preset:=2` and `check_reach --preset 2`
 running alongside `reach_node`:
 
-- **Detected marker pixel:** (u=156.0, v=94.0)
-- **3D position in `camera_optical_frame`:** (X=-0.014, Y=-0.088, Z=0.941) m
-- **3D position in `base_link`:** (X=0.388, Y=0.014, Z=0.059) m
-- **`check_reach` result:** `PASS — tip error 0.0022 m, held 2 simulated seconds;
+- **Detected marker pixel:** (u=157.3, v=92.9)
+- **3D position in `camera_optical_frame`:** (X=-0.009, Y=-0.093, Z=0.940) m
+- **3D position in `base_link`:** (X=0.393, Y=0.009, Z=0.060) m
+- **`check_reach` result:** `PASS - tip error 0.0022 m, held 2 simulated seconds;
   live contact streams clear`
 
 **Robustness observations from this run:**
 
 1. *Transient depth outlier absorbed by the busy guard.* Between two consecutive
    detections at the same pixel, the looked-up depth briefly jumped from 0.941 m
-   to 0.791 m (base-frame Z from 0.059 m to 0.209 m) — most likely the arm itself
+   to 0.791 m (base-frame Z from 0.059 m to 0.209 m) - most likely the arm itself
    momentarily passing through that pixel's line of sight during motion. Because
    `motion_busy` was `True` at that instant, this outlier reading was never used
    to command a new goal, demonstrating that the single-motion guard also
    incidentally protects against transient depth noise during arm movement.
 2. *Expected self-occlusion after arrival.* Once the tip settled above the
    marker, subsequent frames logged `no red marker pixels detected in this
-   frame` — the arm itself blocks the overhead camera's view of the marker it is
+   frame` - the arm itself blocks the overhead camera's view of the marker it is
    now hovering over. This is correctly handled as a missing-detection case
    (warning logged, frame skipped) rather than as an error.
 
@@ -89,13 +95,13 @@ running alongside `reach_node`:
 - **Detected marker pixel (stabilized):** (u=115.0, v=110.0)
 - **3D position in `camera_optical_frame`:** (X=-0.153, Y=-0.034, Z=0.940) m
 - **3D position in `base_link`:** (X=0.334, Y=0.153, Z=0.060) m
-- **`check_reach` result:** `PASS — tip error 0.0021 m, held 2 simulated seconds;
+- **`check_reach` result:** `PASS - tip error 0.0021 m, held 2 simulated seconds;
   live contact streams clear`
 
 The same transient depth outlier pattern observed in Preset 2 (Z momentarily
 reading ~0.765 m instead of ~0.940 m at an unchanged pixel) occurred twice
 during this run as well, and was again absorbed without effect by the
-`motion_busy` guard — suggesting this is a systematic, momentary self-occlusion
+`motion_busy` guard - suggesting this is a systematic, momentary self-occlusion
 artifact of the arm passing through the camera's line of sight, rather than a
 one-off fluke.
 
@@ -104,7 +110,7 @@ one-off fluke.
 | Preset | Detected pixel (u,v) | base_link position (X,Y,Z) [m] | check_reach result |
 |---|---|---|---|
 | 1 | (202.1, 105.0) | (0.351, -0.143, 0.060) | PASS, tip error 0.0029 m |
-| 2 | (156.0, 94.0)  | (0.388, 0.014, 0.059)  | PASS, tip error 0.0022 m |
+| 2 | (157.3, 92.9)  | (0.393, 0.009, 0.060)  | PASS, tip error 0.0022 m |
 | 3 | (115.0, 110.0) | (0.334, 0.153, 0.060)  | PASS, tip error 0.0021 m |
 
 All three presets passed with tip error well under the required 0.02 m
@@ -121,7 +127,7 @@ source install/setup.bash
 
 ### b. Build my_solution (once)
 cd ~/robotics-course-HW/assignments/hw01/my_solution           
-colcon build --symlink-install
+colcon build --symlink-install --base-paths src --executor sequential 
 
 ### c. Run (repeated for preset 1, 2, and 3)
 

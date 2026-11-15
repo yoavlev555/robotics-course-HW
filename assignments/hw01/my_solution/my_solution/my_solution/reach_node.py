@@ -38,7 +38,7 @@ class ReachNode(Node):
         self.depth_sub = message_filters.Subscriber(self, Image, '/camera/depth/image_raw', qos_profile=qos_profile_sensor_data)
         self.info_sub = message_filters.Subscriber(self, CameraInfo, '/camera/camera_info', qos_profile=qos_profile_sensor_data)
 
-        self.sync = message_filters.ApproximateTimeSynchronizer([self.rgb_sub, self.depth_sub, self.info_sub], queue_size=10, slop=0.5)
+        self.sync = message_filters.ApproximateTimeSynchronizer([self.rgb_sub, self.depth_sub, self.info_sub], queue_size=10, slop=0.05)
         self.sync.registerCallback(self.on_synced_frames)
 
         self.get_logger().info('reach_node started, waiting for synchronized camera frames...')
@@ -63,17 +63,23 @@ class ReachNode(Node):
         mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
         mask = mask1 | mask2
 
-        ys, xs = np.nonzero(mask)
-        if len(xs) == 0:
-            self.get_logger().warn('no red marker pixels detected in this frame')
-            return
+        MIN_MARKER_PIXELS = 5  # below this pixel count, treat the detection as noise/occlusion rather than a real marker
 
+        ys, xs = np.nonzero(mask)
+        if len(xs) < MIN_MARKER_PIXELS:
+            self.get_logger().warn(f'too few marker pixels detected ({len(xs)}), rejecting as unreliable')
+            return
+            
         u = float(np.mean(xs))
         v = float(np.mean(ys))
 
         self.get_logger().info(f'marker detected at pixel (u={u:.1f}, v={v:.1f})')
 
-        depth_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
+        try:
+            depth_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
+        except CvBridgeError as e:
+            self.get_logger().warn(f'failed to convert depth image: {e}')
+            return
 
         fx = info_msg.k[0]
         fy = info_msg.k[4]
