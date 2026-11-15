@@ -23,3 +23,5 @@ __pycache__/
 
 # Generated HW6 editable-install metadata.
 /assignments/hw06/environment/*.egg-info/
+install/
+log/
